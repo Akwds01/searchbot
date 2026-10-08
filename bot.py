@@ -145,7 +145,6 @@ async def scrape_pornhub(query: str, page: int = 1, order: str = "", limit: int 
     encoded_query = urllib.parse.quote(query)
     order_param = f"&o={order}" if order else ""
     
-    # Penanganan khusus jika pencarian berdasarkan kategori atau umum
     if query.startswith("cat_"):
         cat_name = query.replace("cat_", "").strip()
         search_url = f"https://www.pornhub.com/video?c={cat_name}&page={page}{order_param}"
@@ -397,7 +396,7 @@ async def scrape_related_videos(viewkey: str, limit: int = 5) -> list:
 # 3. Helper Downloader, FFmpeg Splitting & Progress Bar
 # ---------------------------------------------------------
 def split_video_file(input_file: str, max_size_mb: int = 45) -> list[str]:
-    """Memotong video menggunakan FFmpeg jika melebihi max_size_mb (Penyelesaian Nomor 2)."""
+    """Memotong video menggunakan FFmpeg jika melebihi max_size_mb."""
     if not os.path.exists(input_file):
         return []
 
@@ -444,7 +443,6 @@ def download_video_file(url: str, output_filename: str, quality: str, task_id: s
         return f"{m:02d}:{s:02d}"
 
     def progress_hook(d):
-        # Cek apakah pengguna menekan tombol Batal
         if task_id in CANCEL_DOWNLOAD_TASKS:
             raise Exception("DOWNLOAD_CANCELLED_BY_USER")
 
@@ -592,7 +590,7 @@ def build_search_response(videos: list, query: str, page: int, order: str = ""):
     return text, InlineKeyboardMarkup(buttons)
 
 def build_card_view(video: dict, index_in_page: int, total_in_page: int, page: int, order: str, query: str):
-    """Menampilkan 1 video dalam mode kartu detail dengan pembenahan bug kategori."""
+    """Menampilkan 1 video dalam mode kartu detail."""
     safe_title = html.escape(video["title"])
     global_index = (page - 1) * 5 + index_in_page + 1
 
@@ -833,7 +831,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cat_code = data.split(":", 1)[1]
         status_msg = await query.message.reply_text(f"📂 Membuka Kategori <b>{cat_code.upper()}</b>...", parse_mode="HTML")
         
-        # Penanda query khusus kategori
         search_query = f"cat_{cat_code}"
         videos = await scrape_pornhub(search_query, page=1, limit=5)
         if not videos:
@@ -867,7 +864,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_reply, reply_markup = build_search_response(videos, search_query, page, order)
         await safe_render_text(text_reply, reply_markup)
 
-    # --- HANDLER MODE KARTU DETAIL (BUG FIX KATEGORI) ---
+    # --- HANDLER MODE KARTU DETAIL ---
     elif data.startswith("card:") or data.startswith("card_nav:"):
         await query.answer()
         if data.startswith("card:"):
@@ -1017,7 +1014,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # --- PROSES DOWNLOAD REAL-TIME (DENGAN PEMOTONGAN AUTOMATIS FFMPEG) ---
+    # --- PROSES DOWNLOAD REAL-TIME ---
     elif data.startswith("dl:"):
         await query.answer()
         _, viewkey, quality = data.split(":")
@@ -1050,7 +1047,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if success and os.path.exists(filename):
             await status_msg.edit_text("📤 Memeriksa dan menyiapkan file...")
             
-            # Memotong video otomatis jika ukuran > 45 MB
             files_to_send = split_video_file(filename, max_size_mb=45)
             
             try:
@@ -1093,10 +1089,39 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 CANCEL_DOWNLOAD_TASKS.remove(task_id)
 
 # ---------------------------------------------------------
-# 7. Handler Inline Mode
+# 7. Handler Inline Mode (Fungsi yang Sebelumnya Hilang)
 # ---------------------------------------------------------
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query.strip()
+    if not query:
+        return
 
-# Fungsi dummy agar Render mendeteksi port aktif
+    videos = await scrape_pornhub(query, page=1, limit=5)
+    results = []
+
+    for v in videos:
+        safe_title = html.escape(v["title"])
+        content = (
+            f"🎬 <b>{safe_title}</b>\n"
+            f"⏱ Durasi: {v['duration']} | 👁 Views: {v['views']} | ⭐ {v['rating']}\n"
+            f"🔗 <a href=\"{v['url']}\">Tonton Video</a>"
+        )
+        thumb_url = v.get("thumb") or v.get("preview") or None
+        results.append(
+            InlineQueryResultArticle(
+                id=v["viewkey"],
+                title=v["title"],
+                description=f"⏱ {v['duration']} | ⭐ {v['rating']} | 👁 {v['views']}",
+                thumbnail_url=thumb_url,
+                input_message_content=InputTextMessageContent(message_text=content, parse_mode="HTML")
+            )
+        )
+
+    await update.inline_query.answer(results, cache_time=60)
+
+# ---------------------------------------------------------
+# 8. Main Loop dengan Web Server aiohttp (Mencegah Render Auto-Stop)
+# ---------------------------------------------------------
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -1111,7 +1136,7 @@ def main():
     app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_handler))
 
-    # Bind port otomatis untuk Render
+    # Buka Web Server Dummy khusus untuk Render
     port = int(os.environ.get("PORT", 8080))
     web_app = web.Application()
     web_app.router.add_get("/", handle_ping)
