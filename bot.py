@@ -50,6 +50,7 @@ logging.basicConfig(
 
 FAV_FILE = "favorites.json"
 
+# Pemetaan resmi nama kategori ke slug URL Pornhub
 POPULAR_CATEGORIES = [
     ("🌏 Asian", "asian"),
     ("🏠 Amateur", "amateur"),
@@ -57,10 +58,10 @@ POPULAR_CATEGORIES = [
     ("👩 MILF", "milf"),
     ("🎨 Hentai", "hentai"),
     ("👩‍❤️‍👩 Lesbian", "lesbian"),
-    ("🥽 VR", "vr"),
+    ("🥽 VR", "vr_porn"),
     ("🎭 Cosplay", "cosplay"),
     ("🖤 Ebony", "ebony"),
-    ("🔥 Trending", "trending"),
+    ("🔥 Popular", "popular"),
 ]
 
 def load_favorites() -> dict:
@@ -139,16 +140,17 @@ async def fetch_media_bytes(url: str) -> tuple[bytes | None, str]:
     return None, ""
 
 # ---------------------------------------------------------
-# 2. Web Scraper Modul (Perbaikan Kategori & Kartu)
+# 2. Web Scraper Modul (Perbaikan Genre & Filter)
 # ---------------------------------------------------------
 async def scrape_pornhub(query: str, page: int = 1, order: str = "", limit: int = 5) -> list:
-    encoded_query = urllib.parse.quote(query)
     order_param = f"&o={order}" if order else ""
     
+    # Penanganan akurat untuk Genre / Kategori vs Pencarian Biasa
     if query.startswith("cat_"):
-        cat_name = query.replace("cat_", "").strip()
-        search_url = f"https://www.pornhub.com/video?c={cat_name}&page={page}{order_param}"
+        cat_slug = query.replace("cat_", "").strip()
+        search_url = f"https://www.pornhub.com/video?c={cat_slug}&page={page}{order_param}"
     else:
+        encoded_query = urllib.parse.quote(query)
         search_url = f"https://www.pornhub.com/video/search?search={encoded_query}&page={page}{order_param}"
 
     headers = {
@@ -393,42 +395,52 @@ async def scrape_related_videos(viewkey: str, limit: int = 5) -> list:
     return []
 
 # ---------------------------------------------------------
-# 3. Helper Downloader, FFmpeg Splitting & Progress Bar
+# 3. Helper Downloader, Safe FFmpeg Splitting & Progress Bar
 # ---------------------------------------------------------
 def split_video_file(input_file: str, max_size_mb: int = 45) -> list[str]:
-    """Memotong video menggunakan FFmpeg jika melebihi max_size_mb."""
+    """Memotong video menggunakan FFmpeg secara aman jika melebihi max_size_mb."""
     if not os.path.exists(input_file):
         return []
 
-    file_size_mb = os.path.getsize(input_file) / (1024 * 1024)
-    if file_size_mb <= max_size_mb:
-        return [input_file]
-
-    parts = math.ceil(file_size_mb / max_size_mb)
-    
     try:
-        cmd_duration = f"ffprobe -v error -show_entries format=duration -of default=noprintwrappers=1:nokey=1 \"{input_file}\""
-        total_duration = float(subprocess.check_output(cmd_duration, shell=True).decode().strip())
+        file_size_mb = os.path.getsize(input_file) / (1024 * 1024)
+        if file_size_mb <= max_size_mb:
+            return [input_file]
+
+        parts = math.ceil(file_size_mb / max_size_mb)
+        
+        cmd_duration = [
+            "ffprobe", "-v", "error", 
+            "-show_entries", "format=duration", 
+            "-of", "default=noprintwrappers=1:nokey=1", 
+            input_file
+        ]
+        duration_out = subprocess.check_output(cmd_duration, stderr=subprocess.STDOUT).decode().strip()
+        total_duration = float(duration_out)
+
+        part_duration = total_duration / parts
+        output_files = []
+        base_name, ext = os.path.splitext(input_file)
+
+        for i in range(parts):
+            start_time = i * part_duration
+            out_part = f"{base_name}_part{i+1}{ext}"
+            cmd_split = [
+                "ffmpeg", "-y", 
+                "-ss", str(start_time), 
+                "-i", input_file, 
+                "-t", str(part_duration), 
+                "-c", "copy", 
+                out_part
+            ]
+            subprocess.run(cmd_split, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(out_part):
+                output_files.append(out_part)
+
+        return output_files if output_files else [input_file]
     except Exception as e:
-        logging.error(f"FFprobe error: {e}")
+        logging.error(f"Gagal memotong video via FFmpeg: {e}")
         return [input_file]
-
-    part_duration = total_duration / parts
-    output_files = []
-    base_name, ext = os.path.splitext(input_file)
-
-    for i in range(parts):
-        start_time = i * part_duration
-        out_part = f"{base_name}_part{i+1}{ext}"
-        cmd_split = (
-            f"ffmpeg -y -ss {start_time} -i \"{input_file}\" "
-            f"-t {part_duration} -c copy \"{out_part}\""
-        )
-        subprocess.run(cmd_split, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if os.path.exists(out_part):
-            output_files.append(out_part)
-
-    return output_files if output_files else [input_file]
 
 def download_video_file(url: str, output_filename: str, quality: str, task_id: str, loop, status_msg) -> tuple[bool, str]:
     last_update = [0]
@@ -551,7 +563,8 @@ def build_main_dashboard_keyboard():
 
 def build_search_response(videos: list, query: str, page: int, order: str = ""):
     """Menampilkan 5 video sekaligus dalam daftar ringkas."""
-    safe_query = html.escape(query.replace("cat_", "Kategori: "))
+    display_query = query.replace("cat_", "Kategori: ").capitalize()
+    safe_query = html.escape(display_query)
     order_label = {"tr": "Top Rated", "mv": "Most Viewed", "mr": "Terbaru"}.get(order, "Standar")
     
     text = f"🎬 <b>HASIL PENCARIAN</b>\n"
@@ -561,9 +574,10 @@ def build_search_response(videos: list, query: str, page: int, order: str = ""):
 
     buttons = []
     
+    # Tombol Sorting Filter Resmi (mv = Most Viewed, tr = Top Rated, mr = Most Recent)
     order_btns = [
-        InlineKeyboardButton("🌟 Top Rated", callback_data=f"sort:tr:{query[:20]}"),
         InlineKeyboardButton("👁 Most Viewed", callback_data=f"sort:mv:{query[:20]}"),
+        InlineKeyboardButton("🌟 Top Rated", callback_data=f"sort:tr:{query[:20]}"),
         InlineKeyboardButton("🆕 Terbaru", callback_data=f"sort:mr:{query[:20]}"),
     ]
     buttons.append(order_btns)
@@ -606,6 +620,8 @@ def build_card_view(video: dict, index_in_page: int, total_in_page: int, page: i
     buttons.append([
         InlineKeyboardButton("📱 360p", callback_data=f"dl:{video['viewkey']}:360"),
         InlineKeyboardButton("🎬 480p", callback_data=f"dl:{video['viewkey']}:480"),
+    ])
+    buttons.append([
         InlineKeyboardButton("🖥 720p", callback_data=f"dl:{video['viewkey']}:720"),
         InlineKeyboardButton("🎵 MP3", callback_data=f"dl:{video['viewkey']}:mp3"),
     ])
@@ -843,7 +859,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("sort:"):
         await query.answer()
         _, order, search_query = data.split(":", 2)
-        status_msg = await query.message.reply_text("🔄 Mengubah Urutan Pencarian...", parse_mode="HTML")
+        status_msg = await query.message.reply_text("🔄 Mengubah Urutan Filter...", parse_mode="HTML")
         videos = await scrape_pornhub(search_query, page=1, order=order, limit=5)
         if not videos:
             await status_msg.edit_text("❌ Hasil tidak ditemukan.")
@@ -938,27 +954,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if media_bytes:
                 file_obj = io.BytesIO(media_bytes)
-                file_obj.name = f"preview_{viewkey}.{ext}"
+                file_obj.name = f"preview_{viewkey}.{ext if ext else 'webm'}"
                 caption_text = f"🎞 <b>Preview Teaser</b>\n{html.escape(video_info['title'])}"
 
                 sent = False
-                if ext in ["gif", "mp4"]:
-                    try:
-                        await query.message.reply_animation(animation=file_obj, caption=caption_text, parse_mode="HTML")
-                        sent = True
-                    except Exception:
-                        file_obj.seek(0)
-
-                if not sent and ext in ["webm", "mp4"]:
-                    try:
-                        await query.message.reply_video(video=file_obj, caption=caption_text, parse_mode="HTML")
-                        sent = True
-                    except Exception:
-                        file_obj.seek(0)
+                try:
+                    await query.message.reply_video(video=file_obj, caption=caption_text, parse_mode="HTML")
+                    sent = True
+                except Exception:
+                    file_obj.seek(0)
 
                 if not sent:
                     try:
-                        await query.message.reply_photo(photo=file_obj, caption=caption_text, parse_mode="HTML")
+                        await query.message.reply_animation(animation=file_obj, caption=caption_text, parse_mode="HTML")
                         sent = True
                     except Exception:
                         file_obj.seek(0)
@@ -968,14 +976,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await query.message.reply_document(document=file_obj, caption=caption_text, parse_mode="HTML")
                         sent = True
                     except Exception as e:
-                        logging.error(f"Gagal total mengirim preview: {e}")
+                        logging.error(f"Gagal kirim preview: {e}")
 
                 if sent:
                     await status_prev.delete()
                 else:
                     await status_prev.edit_text("❌ Format media preview tidak didukung oleh Telegram.")
             else:
-                await status_prev.edit_text("❌ Gagal mengunduh preview (terblokir atau link expired).")
+                await status_prev.edit_text("❌ Gagal mengunduh preview.")
         else:
             await query.message.reply_text("❌ Teaser preview tidak tersedia untuk video ini.")
 
@@ -1089,7 +1097,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 CANCEL_DOWNLOAD_TASKS.remove(task_id)
 
 # ---------------------------------------------------------
-# 7. Handler Inline Mode (Fungsi yang Sebelumnya Hilang)
+# 7. Handler Inline Mode
 # ---------------------------------------------------------
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query.strip()
@@ -1120,7 +1128,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.inline_query.answer(results, cache_time=60)
 
 # ---------------------------------------------------------
-# 8. Main Loop dengan Web Server aiohttp (Mencegah Render Auto-Stop)
+# 8. Main Loop dengan Web Server aiohttp
 # ---------------------------------------------------------
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
@@ -1136,7 +1144,6 @@ def main():
     app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_handler))
 
-    # Buka Web Server Dummy khusus untuk Render
     port = int(os.environ.get("PORT", 8080))
     web_app = web.Application()
     web_app.router.add_get("/", handle_ping)
