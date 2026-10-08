@@ -50,7 +50,6 @@ logging.basicConfig(
 
 FAV_FILE = "favorites.json"
 
-# Pemetaan resmi nama kategori ke slug URL Pornhub
 POPULAR_CATEGORIES = [
     ("🌏 Asian", "asian"),
     ("🏠 Amateur", "amateur"),
@@ -58,7 +57,7 @@ POPULAR_CATEGORIES = [
     ("👩 MILF", "milf"),
     ("🎨 Hentai", "hentai"),
     ("👩‍❤️‍👩 Lesbian", "lesbian"),
-    ("🥽 VR", "vr_porn"),
+    ("🥽 VR", "vr"),
     ("🎭 Cosplay", "cosplay"),
     ("🖤 Ebony", "ebony"),
     ("🔥 Popular", "popular"),
@@ -140,32 +139,41 @@ async def fetch_media_bytes(url: str) -> tuple[bytes | None, str]:
     return None, ""
 
 # ---------------------------------------------------------
-# 2. Web Scraper Modul (Perbaikan Genre & Filter)
+# 2. Web Scraper Modul (Pencarian & Kategori Akurat)
 # ---------------------------------------------------------
 async def scrape_pornhub(query: str, page: int = 1, order: str = "", limit: int = 5) -> list:
     order_param = f"&o={order}" if order else ""
     
-    # Penanganan akurat untuk Genre / Kategori vs Pencarian Biasa
     if query.startswith("cat_"):
         cat_slug = query.replace("cat_", "").strip()
-        search_url = f"https://www.pornhub.com/video?c={cat_slug}&page={page}{order_param}"
+        if cat_slug in ["popular", "trending"]:
+            search_url = f"https://www.pornhub.com/video?o=mv&page={page}"
+        else:
+            search_url = f"https://www.pornhub.com/video?c={cat_slug}&page={page}{order_param}"
     else:
-        encoded_query = urllib.parse.quote(query)
+        encoded_query = urllib.parse.quote_plus(query)
         search_url = f"https://www.pornhub.com/video/search?search={encoded_query}&page={page}{order_param}"
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.pornhub.com/",
     }
 
     try:
         async with AsyncSession(impersonate="chrome120", timeout=20) as session:
             response = await session.get(search_url, headers=headers)
-            logging.info(f"Scraper Status Code ({query}): {response.status_code}")
+            logging.info(f"Scraper Target URL: {search_url} | Status: {response.status_code}")
 
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
-                video_items = soup.select("li.pcVideoListItem, div.phimage, div.wrap, li.videoblock")
+                video_items = soup.select(
+                    "ul.videos search-video-thumbs li, "
+                    "ul.videos li, "
+                    "li.pcVideoListItem, "
+                    "div.phimage, "
+                    "li.videoblock"
+                )
 
                 results = []
                 for item in video_items:
@@ -179,11 +187,12 @@ async def scrape_pornhub(query: str, page: int = 1, order: str = "", limit: int 
                         continue
 
                     viewkey = viewkey_match.group(1)
-                    title = a_tag.get("title") or a_tag.get_text(strip=True)
-                    if "play all" in title.lower() or "playlist" in href.lower():
+                    img_tag = item.select_one("img")
+                    title = a_tag.get("title") or (img_tag.get("alt") if img_tag else "") or a_tag.get_text(strip=True)
+                    
+                    if not title or "play all" in title.lower() or "playlist" in href.lower():
                         continue
 
-                    img_tag = item.select_one("img")
                     thumb_img = ""
                     preview_gif = ""
                     if img_tag:
@@ -195,76 +204,9 @@ async def scrape_pornhub(query: str, page: int = 1, order: str = "", limit: int 
                         if preview_gif.startswith("//"):
                             preview_gif = "https:" + preview_gif
 
-                    duration_elem = item.select_one("var.duration, span.duration")
-                    views_elem = item.select_one("span.views var, class.views")
-                    rating_elem = item.select_one("div.value, class.rating")
-
-                    video_data = {
-                        "title": title,
-                        "duration": duration_elem.get_text(strip=True) if duration_elem else "-",
-                        "views": views_elem.get_text(strip=True) if views_elem else "-",
-                        "rating": rating_elem.get_text(strip=True) if rating_elem else "-",
-                        "url": f"https://www.pornhub.com/view_video.php?viewkey={viewkey}",
-                        "viewkey": viewkey,
-                        "thumb": thumb_img,
-                        "preview": preview_gif,
-                    }
-
-                    if title and not any(v["viewkey"] == viewkey for v in results):
-                        results.append(video_data)
-                        VIDEO_CACHE[viewkey] = video_data
-
-                    if len(results) >= limit:
-                        break
-
-                return results
-    except Exception as e:
-        logging.error(f"Error Scraper: {e}")
-    return []
-
-async def scrape_trending_today(limit: int = 5) -> list:
-    url = "https://www.pornhub.com/video?o=mv&t=t"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    }
-    try:
-        async with AsyncSession(impersonate="chrome120", timeout=20) as session:
-            response = await session.get(url, headers=headers)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, "html.parser")
-                video_items = soup.select("li.pcVideoListItem, div.phimage, div.wrap, li.videoblock")
-
-                results = []
-                for item in video_items:
-                    a_tag = item.select_one("a[href*='/view_video.php']")
-                    if not a_tag:
-                        continue
-
-                    href = a_tag.get("href", "")
-                    viewkey_match = re.search(r"viewkey=([a-zA-Z0-9]+)", href)
-                    if not viewkey_match:
-                        continue
-
-                    viewkey = viewkey_match.group(1)
-                    title = a_tag.get("title") or a_tag.get_text(strip=True)
-                    if "play all" in title.lower():
-                        continue
-
-                    img_tag = item.select_one("img")
-                    thumb_img = ""
-                    preview_gif = ""
-                    if img_tag:
-                        thumb_img = img_tag.get("data-mediumthumb") or img_tag.get("data-thumb_url") or img_tag.get("data-src") or img_tag.get("src") or ""
-                        preview_gif = img_tag.get("data-mediabook") or thumb_img
-                        
-                        if thumb_img.startswith("//"):
-                            thumb_img = "https:" + thumb_img
-                        if preview_gif.startswith("//"):
-                            preview_gif = "https:" + preview_gif
-
-                    duration_elem = item.select_one("var.duration, span.duration")
-                    views_elem = item.select_one("span.views var, class.views")
-                    rating_elem = item.select_one("div.value, class.rating")
+                    duration_elem = item.select_one("var.duration, span.duration, em.duration")
+                    views_elem = item.select_one("span.views var, class.views, .views")
+                    rating_elem = item.select_one("div.value, class.rating, .rating")
 
                     video_data = {
                         "title": title,
@@ -283,11 +225,14 @@ async def scrape_trending_today(limit: int = 5) -> list:
 
                     if len(results) >= limit:
                         break
+
                 return results
     except Exception as e:
-        logging.error(f"Error Trending Scraper: {e}")
-    
-    return await scrape_pornhub("popular", page=1, limit=limit)
+        logging.error(f"Error Scraper: {e}")
+    return []
+
+async def scrape_trending_today(limit: int = 5) -> list:
+    return await scrape_pornhub("cat_popular", page=1, limit=limit)
 
 async def scrape_top_actresses(limit: int = 6) -> list:
     url = "https://www.pornhub.com/pornstars"
@@ -397,8 +342,7 @@ async def scrape_related_videos(viewkey: str, limit: int = 5) -> list:
 # ---------------------------------------------------------
 # 3. Helper Downloader, Safe FFmpeg Splitting & Progress Bar
 # ---------------------------------------------------------
-def split_video_file(input_file: str, max_size_mb: int = 45) -> list[str]:
-    """Memotong video menggunakan FFmpeg secara aman jika melebihi max_size_mb."""
+def split_video_file(input_file: str, max_size_mb: int = 40) -> list[str]:
     if not os.path.exists(input_file):
         return []
 
@@ -549,7 +493,7 @@ def download_video_file(url: str, output_filename: str, quality: str, task_id: s
 def build_main_dashboard_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔥 Trending Hari Ini", callback_data="dash:trending"),
+            InlineKeyboardButton("🔥 Popular", callback_data="dash:trending"),
             InlineKeyboardButton("⭐ Top Aktres", callback_data="dash:actresses"),
         ],
         [
@@ -562,7 +506,6 @@ def build_main_dashboard_keyboard():
     ])
 
 def build_search_response(videos: list, query: str, page: int, order: str = ""):
-    """Menampilkan 5 video sekaligus dalam daftar ringkas."""
     display_query = query.replace("cat_", "Kategori: ").capitalize()
     safe_query = html.escape(display_query)
     order_label = {"tr": "Top Rated", "mv": "Most Viewed", "mr": "Terbaru"}.get(order, "Standar")
@@ -574,7 +517,6 @@ def build_search_response(videos: list, query: str, page: int, order: str = ""):
 
     buttons = []
     
-    # Tombol Sorting Filter Resmi (mv = Most Viewed, tr = Top Rated, mr = Most Recent)
     order_btns = [
         InlineKeyboardButton("👁 Most Viewed", callback_data=f"sort:mv:{query[:20]}"),
         InlineKeyboardButton("🌟 Top Rated", callback_data=f"sort:tr:{query[:20]}"),
@@ -604,7 +546,6 @@ def build_search_response(videos: list, query: str, page: int, order: str = ""):
     return text, InlineKeyboardMarkup(buttons)
 
 def build_card_view(video: dict, index_in_page: int, total_in_page: int, page: int, order: str, query: str):
-    """Menampilkan 1 video dalam mode kartu detail."""
     safe_title = html.escape(video["title"])
     global_index = (page - 1) * 5 + index_in_page + 1
 
@@ -686,7 +627,7 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = text
 
     if not query:
-        await update.message.reply_text("Format salah!\nGunakan: <code>!phsearch &lt;kata_kunci&gt;</code>", parse_mode="HTML")
+        await update.message.reply_text("Format salah!\nGunakan: <code>/search &lt;kata_kunci&gt;</code>", parse_mode="HTML")
         return
 
     safe_query = html.escape(query)
@@ -738,7 +679,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
 
-    # --- NAVIGASI DASHBOARD UTAMA ---
     if data == "dash:main":
         await query.answer()
         text = "🏠 <b>Menu Utama Bot</b>\nPilih opsi berikut:"
@@ -746,13 +686,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "dash:trending":
         await query.answer()
-        status_msg = await query.message.reply_text("🔥 Mengambil **Trending Hari Ini**...", parse_mode="Markdown")
+        status_msg = await query.message.reply_text("🔥 Mengambil **Popular**...", parse_mode="Markdown")
         videos = await scrape_trending_today(limit=5)
         if not videos:
-            await status_msg.edit_text("❌ Gagal mengambil data trending.")
+            await status_msg.edit_text("❌ Gagal mengambil data popular.")
             return
 
-        text_reply, reply_markup = build_search_response(videos, "Trending Hari Ini", page=1)
+        text_reply, reply_markup = build_search_response(videos, "Popular", page=1)
         await status_msg.edit_text(text_reply, parse_mode="HTML", reply_markup=reply_markup, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
     elif data == "dash:actresses":
@@ -837,7 +777,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append([InlineKeyboardButton("🏠 Menu Utama", callback_data="dash:main")])
         await query.message.reply_text(text_reply, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
-    # --- KATEGORI & SORTING ---
     elif data == "show_cat":
         await query.answer()
         await safe_render_text("📂 <b>Pilih Kategori / Genre:</b>", build_category_keyboard())
@@ -880,7 +819,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_reply, reply_markup = build_search_response(videos, search_query, page, order)
         await safe_render_text(text_reply, reply_markup)
 
-    # --- HANDLER MODE KARTU DETAIL ---
     elif data.startswith("card:") or data.startswith("card_nav:"):
         await query.answer()
         if data.startswith("card:"):
@@ -921,7 +859,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text("❌ Data video tidak ditemukan.")
 
-    # --- MENU OPSI VIDEO ---
     elif data.startswith("opt:"):
         await query.answer()
         viewkey = data.split(":", 1)[1]
@@ -932,7 +869,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
             [
                 InlineKeyboardButton("🖥 720p", callback_data=f"dl:{viewkey}:720"),
-                InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"dl:{viewkey}:mp3"),
+                InlineKeyboardButton("🎵 MP3", callback_data=f"dl:{viewkey}:mp3"),
             ],
             [
                 InlineKeyboardButton("🎞 Preview GIF", callback_data=f"prev:{viewkey}"),
@@ -1012,7 +949,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remove_favorite(user_id, viewkey)
         await query.answer("🗑 Berhasil dihapus dari Favorit.", show_alert=False)
 
-    # --- FITUR BATALKAN DOWNLOAD ---
     elif data.startswith("cancel_dl:"):
         task_id = data.split(":", 1)[1]
         CANCEL_DOWNLOAD_TASKS.add(task_id)
@@ -1022,7 +958,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # --- PROSES DOWNLOAD REAL-TIME ---
+    # --- PROSES DOWNLOAD REAL-TIME (DENGAN TIMEOUT LOGGINGS & FALLBACK DOKUMEN) ---
     elif data.startswith("dl:"):
         await query.answer()
         _, viewkey, quality = data.split(":")
@@ -1055,7 +991,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if success and os.path.exists(filename):
             await status_msg.edit_text("📤 Memeriksa dan menyiapkan file...")
             
-            files_to_send = split_video_file(filename, max_size_mb=45)
+            # Potong video > 40 MB agar tidak melebihi batas memori Render
+            files_to_send = split_video_file(filename, max_size_mb=40)
             
             try:
                 for idx, part_file in enumerate(files_to_send, start=1):
@@ -1065,12 +1002,30 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         else f"🎬 <b>Video ({quality}p) Berhasil Diunduh!</b>\n🔗 {target_url}"
                     )
                     
+                    sent = False
                     with open(part_file, "rb") as file_data:
                         if quality == "mp3":
-                            await query.message.reply_audio(audio=file_data, caption=caption, parse_mode="HTML")
+                            try:
+                                await query.message.reply_audio(audio=file_data, caption=caption, parse_mode="HTML", write_timeout=120)
+                                sent = True
+                            except Exception as e:
+                                logging.error(f"Gagal kirim audio: {e}")
                         else:
-                            await query.message.reply_video(video=file_data, caption=caption, parse_mode="HTML")
-                    
+                            try:
+                                await query.message.reply_video(video=file_data, caption=caption, parse_mode="HTML", write_timeout=120)
+                                sent = True
+                            except Exception as e:
+                                logging.warning(f"Gagal kirim video native, mencoba kirim sebagai dokumen: {e}")
+
+                    # Fallback kirim via dokumen jika reply_video gagal
+                    if not sent and quality != "mp3":
+                        with open(part_file, "rb") as file_data:
+                            try:
+                                await query.message.reply_document(document=file_data, caption=caption, parse_mode="HTML", write_timeout=120)
+                                sent = True
+                            except Exception as e:
+                                logging.error(f"Gagal total kirim document: {e}")
+
                     if part_file != filename and os.path.exists(part_file):
                         os.remove(part_file)
 
@@ -1128,13 +1083,20 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.inline_query.answer(results, cache_time=60)
 
 # ---------------------------------------------------------
-# 8. Main Loop dengan Web Server aiohttp
+# 8. Main Loop dengan Web Server aiohttp & Timeout Khusus
 # ---------------------------------------------------------
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .write_timeout(120)
+        .read_timeout(120)
+        .connect_timeout(60)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("phsearch", search_handler))
