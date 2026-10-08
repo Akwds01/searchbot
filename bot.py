@@ -9,6 +9,7 @@ import urllib.parse
 import asyncio
 import io
 import math
+import subprocess
 from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession
 from dotenv import load_dotenv
@@ -33,7 +34,7 @@ from telegram.ext import (
 )
 
 # ---------------------------------------------------------
-# 1. Konfigurasi Lingkungan, Logging & Database Favorit
+# 1. Konfigurasi Lingkungan, Logging & Global State
 # ---------------------------------------------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -98,6 +99,7 @@ def get_favorites(user_id: int) -> list:
     return load_favorites().get(str(user_id), [])
 
 VIDEO_CACHE = {}
+CANCEL_DOWNLOAD_TASKS = set()
 
 async def fetch_media_bytes(url: str) -> tuple[bytes | None, str]:
     if not url:
@@ -106,7 +108,7 @@ async def fetch_media_bytes(url: str) -> tuple[bytes | None, str]:
         url = "https:" + url
         
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Referer": "https://www.pornhub.com/",
     }
     
@@ -136,19 +138,32 @@ async def fetch_media_bytes(url: str) -> tuple[bytes | None, str]:
     return None, ""
 
 # ---------------------------------------------------------
-# 2. Web Scraper Modul (Pornhub Multi-Feature)
+# 2. Web Scraper Modul (Perbaikan Kategori & Kartu)
 # ---------------------------------------------------------
 async def scrape_pornhub(query: str, page: int = 1, order: str = "", limit: int = 5) -> list:
     encoded_query = urllib.parse.quote(query)
     order_param = f"&o={order}" if order else ""
-    search_url = f"https://www.pornhub.com/video/search?search={encoded_query}&page={page}{order_param}"
+    
+    # Penanganan khusus jika pencarian berdasarkan kategori atau umum
+    if query.startswith("cat_"):
+        cat_name = query.replace("cat_", "").strip()
+        search_url = f"https://www.pornhub.com/video?c={cat_name}&page={page}{order_param}"
+    else:
+        search_url = f"https://www.pornhub.com/video/search?search={encoded_query}&page={page}{order_param}"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
 
     try:
-        async with AsyncSession(impersonate="chrome120", timeout=15) as session:
-            response = await session.get(search_url)
+        async with AsyncSession(impersonate="chrome120", timeout=20) as session:
+            response = await session.get(search_url, headers=headers)
+            logging.info(f"Scraper Status Code ({query}): {response.status_code}")
+
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
-                video_items = soup.select("li.pcVideoListItem, div.phimage, div.wrap")
+                video_items = soup.select("li.pcVideoListItem, div.phimage, div.wrap, li.videoblock")
 
                 results = []
                 for item in video_items:
@@ -207,12 +222,15 @@ async def scrape_pornhub(query: str, page: int = 1, order: str = "", limit: int 
 
 async def scrape_trending_today(limit: int = 5) -> list:
     url = "https://www.pornhub.com/video?o=mv&t=t"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    }
     try:
-        async with AsyncSession(impersonate="chrome120", timeout=15) as session:
-            response = await session.get(url)
+        async with AsyncSession(impersonate="chrome120", timeout=20) as session:
+            response = await session.get(url, headers=headers)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
-                video_items = soup.select("li.pcVideoListItem, div.phimage, div.wrap")
+                video_items = soup.select("li.pcVideoListItem, div.phimage, div.wrap, li.videoblock")
 
                 results = []
                 for item in video_items:
@@ -266,13 +284,17 @@ async def scrape_trending_today(limit: int = 5) -> list:
                 return results
     except Exception as e:
         logging.error(f"Error Trending Scraper: {e}")
-    return []
+    
+    return await scrape_pornhub("popular", page=1, limit=limit)
 
 async def scrape_top_actresses(limit: int = 6) -> list:
     url = "https://www.pornhub.com/pornstars"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    }
     try:
-        async with AsyncSession(impersonate="chrome120", timeout=15) as session:
-            response = await session.get(url)
+        async with AsyncSession(impersonate="chrome120", timeout=20) as session:
+            response = await session.get(url, headers=headers)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
                 star_items = soup.select("li.pornstarImage, ul#pornstarsPopularMaster li, div.pornstarBlock")
@@ -303,9 +325,12 @@ async def scrape_top_actresses(limit: int = 6) -> list:
 
 async def scrape_related_videos(viewkey: str, limit: int = 5) -> list:
     url = f"https://www.pornhub.com/view_video.php?viewkey={viewkey}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    }
     try:
-        async with AsyncSession(impersonate="chrome120", timeout=15) as session:
-            response = await session.get(url)
+        async with AsyncSession(impersonate="chrome120", timeout=20) as session:
+            response = await session.get(url, headers=headers)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
                 video_items = soup.select("ul#relatedVideosVideos li, li.pcVideoListItem, div.phimage")
@@ -368,9 +393,44 @@ async def scrape_related_videos(viewkey: str, limit: int = 5) -> list:
     return []
 
 # ---------------------------------------------------------
-# 3. Helper Downloader & Progress Bar
+# 3. Helper Downloader, FFmpeg Splitting & Progress Bar
 # ---------------------------------------------------------
-def download_video_file(url: str, output_filename: str, quality: str, loop, status_msg) -> tuple[bool, str]:
+def split_video_file(input_file: str, max_size_mb: int = 45) -> list[str]:
+    """Memotong video menggunakan FFmpeg jika melebihi max_size_mb (Penyelesaian Nomor 2)."""
+    if not os.path.exists(input_file):
+        return []
+
+    file_size_mb = os.path.getsize(input_file) / (1024 * 1024)
+    if file_size_mb <= max_size_mb:
+        return [input_file]
+
+    parts = math.ceil(file_size_mb / max_size_mb)
+    
+    try:
+        cmd_duration = f"ffprobe -v error -show_entries format=duration -of default=noprintwrappers=1:nokey=1 \"{input_file}\""
+        total_duration = float(subprocess.check_output(cmd_duration, shell=True).decode().strip())
+    except Exception as e:
+        logging.error(f"FFprobe error: {e}")
+        return [input_file]
+
+    part_duration = total_duration / parts
+    output_files = []
+    base_name, ext = os.path.splitext(input_file)
+
+    for i in range(parts):
+        start_time = i * part_duration
+        out_part = f"{base_name}_part{i+1}{ext}"
+        cmd_split = (
+            f"ffmpeg -y -ss {start_time} -i \"{input_file}\" "
+            f"-t {part_duration} -c copy \"{out_part}\""
+        )
+        subprocess.run(cmd_split, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(out_part):
+            output_files.append(out_part)
+
+    return output_files if output_files else [input_file]
+
+def download_video_file(url: str, output_filename: str, quality: str, task_id: str, loop, status_msg) -> tuple[bool, str]:
     last_update = [0]
 
     def format_time(seconds: float) -> str:
@@ -383,6 +443,10 @@ def download_video_file(url: str, output_filename: str, quality: str, loop, stat
         return f"{m:02d}:{s:02d}"
 
     def progress_hook(d):
+        # Cek apakah pengguna menekan tombol Batal
+        if task_id in CANCEL_DOWNLOAD_TASKS:
+            raise Exception("DOWNLOAD_CANCELLED_BY_USER")
+
         if d['status'] == 'downloading':
             now = time.time()
             if now - last_update[0] >= 2.5:
@@ -394,6 +458,10 @@ def download_video_file(url: str, output_filename: str, quality: str, loop, stat
 
                 downloaded_mb = downloaded / (1024 * 1024)
                 
+                cancel_markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Batalkan Download", callback_data=f"cancel_dl:{task_id}")]
+                ])
+
                 if total > 0:
                     total_mb = total / (1024 * 1024)
                     percent = (downloaded / total) * 100
@@ -421,7 +489,7 @@ def download_video_file(url: str, output_filename: str, quality: str, loop, stat
                 
                 try:
                     asyncio.run_coroutine_threadsafe(
-                        status_msg.edit_text(msg_text, parse_mode="HTML"), 
+                        status_msg.edit_text(msg_text, parse_mode="HTML", reply_markup=cancel_markup), 
                         loop
                     )
                 except Exception:
@@ -451,6 +519,10 @@ def download_video_file(url: str, output_filename: str, quality: str, loop, stat
             direct_url = info.get("url", "")
         return os.path.exists(output_filename), direct_url
     except Exception as e:
+        if "DOWNLOAD_CANCELLED_BY_USER" in str(e):
+            logging.info("Pengunduhan dibatalkan oleh user.")
+            return False, "CANCELLED"
+            
         logging.error(f"Error Downloader: {e}")
         try:
             with yt_dlp.YoutubeDL({"quiet": True, "nocheckcertificate": True}) as ydl:
@@ -461,7 +533,7 @@ def download_video_file(url: str, output_filename: str, quality: str, loop, stat
         return False, direct_url
 
 # ---------------------------------------------------------
-# 4. Interface Keyboard & Teks Modul (UI/UX Terbarui)
+# 4. Interface Keyboard & Teks Modul
 # ---------------------------------------------------------
 def build_main_dashboard_keyboard():
     return InlineKeyboardMarkup([
@@ -480,7 +552,7 @@ def build_main_dashboard_keyboard():
 
 def build_search_response(videos: list, query: str, page: int, order: str = ""):
     """Menampilkan 5 video sekaligus dalam daftar ringkas."""
-    safe_query = html.escape(query)
+    safe_query = html.escape(query.replace("cat_", "Kategori: "))
     order_label = {"tr": "Top Rated", "mv": "Most Viewed", "mr": "Terbaru"}.get(order, "Standar")
     
     text = f"🎬 <b>HASIL PENCARIAN</b>\n"
@@ -519,14 +591,11 @@ def build_search_response(videos: list, query: str, page: int, order: str = ""):
     return text, InlineKeyboardMarkup(buttons)
 
 def build_card_view(video: dict, index_in_page: int, total_in_page: int, page: int, order: str, query: str):
-    """Menampilkan 1 video dalam mode kartu detail dengan thumbnail gambar."""
+    """Menampilkan 1 video dalam mode kartu detail dengan pembenahan bug kategori."""
     safe_title = html.escape(video["title"])
     global_index = (page - 1) * 5 + index_in_page + 1
-    thumb_url = video.get("thumb") or video.get("preview") or ""
 
-    # Menyisipkan link gambar tersembunyi agar Telegram menampilkan Thumbnail besar di atas teks
-    text = f'<a href="{thumb_url}">&#8203;</a>' if thumb_url else ""
-    text += f"🎴 <b>KARTU DETAIL VIDEO #{global_index}</b>\n\n"
+    text = f"🎴 <b>KARTU DETAIL VIDEO #{global_index}</b>\n\n"
     text += f"📌 <b>{safe_title}</b>\n"
     text += f"⏱ Durasi  : <code>{video['duration']}</code>\n"
     text += f"👁 Views   : <code>{video['views']}</code>\n"
@@ -548,10 +617,7 @@ def build_card_view(video: dict, index_in_page: int, total_in_page: int, page: i
         InlineKeyboardButton("⭐ Simpan Favorit", callback_data=f"fav_add:{video['viewkey']}"),
     ])
 
-    # Logika Navigasi Kartu Tanpa Batas (Bisa Di-next Ke Halaman Selanjutnya)
     card_nav = []
-    
-    # Tombol Prev
     if index_in_page > 0:
         card_nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"card_nav:{index_in_page - 1}:{page}:{order}:{query[:20]}"))
     elif page > 1:
@@ -559,7 +625,6 @@ def build_card_view(video: dict, index_in_page: int, total_in_page: int, page: i
 
     card_nav.append(InlineKeyboardButton(f"📌 Kartu #{global_index}", callback_data="ignore"))
 
-    # Tombol Next
     if index_in_page < total_in_page - 1:
         card_nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"card_nav:{index_in_page + 1}:{page}:{order}:{query[:20]}"))
     else:
@@ -638,11 +703,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
 
+    async def safe_render_text(text_reply, reply_markup):
+        try:
+            await query.edit_message_text(
+                text_reply,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+        except Exception:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.message.reply_text(
+                text_reply,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+
     # --- NAVIGASI DASHBOARD UTAMA ---
     if data == "dash:main":
         await query.answer()
         text = "🏠 <b>Menu Utama Bot</b>\nPilih opsi berikut:"
-        await query.message.reply_text(text, parse_mode="HTML", reply_markup=build_main_dashboard_keyboard())
+        await safe_render_text(text, build_main_dashboard_keyboard())
 
     elif data == "dash:trending":
         await query.answer()
@@ -691,8 +776,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if videos:
             v = random.choice(videos)
             thumb_url = v.get("thumb") or v.get("preview") or ""
-            text_reply = f'<a href="{thumb_url}">&#8203;</a>' if thumb_url else ""
-            text_reply += (
+            text_reply = (
                 f"🎲 <b>VIDEO ACAK PILIHAN:</b>\n\n"
                 f"<b>{html.escape(v['title'])}</b>\n"
                 f"⏱ Durasi: {v['duration']} | 👁 Views: {v['views']} | ⭐ {v['rating']}\n"
@@ -703,12 +787,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🎲 Coba Acak Lagi", callback_data="dash:random")],
                 [InlineKeyboardButton("🏠 Menu Utama", callback_data="dash:main")]
             ]
-            await status_msg.edit_text(
-                text_reply, 
-                parse_mode="HTML", 
-                reply_markup=InlineKeyboardMarkup(buttons), 
-                link_preview_options=LinkPreviewOptions(is_disabled=False, show_above_text=True, prefer_large_media=True)
-            )
+            
+            if thumb_url:
+                try:
+                    await status_msg.delete()
+                    await query.message.reply_photo(
+                        photo=thumb_url,
+                        caption=text_reply,
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(buttons)
+                    )
+                except Exception:
+                    await status_msg.edit_text(text_reply, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+            else:
+                await status_msg.edit_text(text_reply, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
         else:
             await status_msg.edit_text("❌ Gagal mengambil video acak.")
 
@@ -733,18 +825,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- KATEGORI & SORTING ---
     elif data == "show_cat":
         await query.answer()
-        await query.message.reply_text("📂 <b>Pilih Kategori / Genre:</b>", parse_mode="HTML", reply_markup=build_category_keyboard())
+        await safe_render_text("📂 <b>Pilih Kategori / Genre:</b>", build_category_keyboard())
 
     elif data.startswith("cat:"):
         await query.answer()
         cat_code = data.split(":", 1)[1]
         status_msg = await query.message.reply_text(f"📂 Membuka Kategori <b>{cat_code.upper()}</b>...", parse_mode="HTML")
-        videos = await scrape_pornhub(cat_code, page=1, limit=5)
+        
+        # Penanda query khusus kategori
+        search_query = f"cat_{cat_code}"
+        videos = await scrape_pornhub(search_query, page=1, limit=5)
         if not videos:
             await status_msg.edit_text("❌ Tidak dapat mengambil data kategori.")
             return
 
-        text_reply, reply_markup = build_search_response(videos, cat_code, page=1)
+        text_reply, reply_markup = build_search_response(videos, search_query, page=1)
         await status_msg.edit_text(text_reply, parse_mode="HTML", reply_markup=reply_markup, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
     elif data.startswith("sort:"):
@@ -769,9 +864,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         text_reply, reply_markup = build_search_response(videos, search_query, page, order)
-        await query.edit_message_text(text_reply, parse_mode="HTML", reply_markup=reply_markup, link_preview_options=LinkPreviewOptions(is_disabled=True))
+        await safe_render_text(text_reply, reply_markup)
 
-    # --- HANDLER MODE KARTU DETAIL (TANPA BATAS) ---
+    # --- HANDLER MODE KARTU DETAIL (BUG FIX KATEGORI) ---
     elif data.startswith("card:") or data.startswith("card_nav:"):
         await query.answer()
         if data.startswith("card:"):
@@ -793,16 +888,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 order=order,
                 query=search_query
             )
-            await query.edit_message_text(
-                text_reply,
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-                link_preview_options=LinkPreviewOptions(is_disabled=False, show_above_text=True, prefer_large_media=True)
-            )
+            
+            thumb_url = target_video.get("thumb") or target_video.get("preview") or ""
+            
+            if thumb_url:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.message.reply_photo(
+                    photo=thumb_url,
+                    caption=text_reply,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+            else:
+                await safe_render_text(text_reply, reply_markup)
         else:
             await query.message.reply_text("❌ Data video tidak ditemukan.")
 
-    # --- MENU OPSI VIDEO (DOWNLOAD, PREVIEW, RELATED, FAVORITE) ---
+    # --- MENU OPSI VIDEO ---
     elif data.startswith("opt:"):
         await query.answer()
         viewkey = data.split(":", 1)[1]
@@ -888,7 +993,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_reply, reply_markup = build_search_response(videos, "Video Serupa", page=1)
         await status_msg.edit_text(text_reply, parse_mode="HTML", reply_markup=reply_markup, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
-    # --- TOAST NOTIFICATIONS PADA FAVORIT ---
     elif data.startswith("fav_add:"):
         viewkey = data.split(":", 1)[1]
         video_info = VIDEO_CACHE.get(viewkey, {"title": f"Video {viewkey}", "duration": "-", "viewkey": viewkey})
@@ -902,45 +1006,81 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remove_favorite(user_id, viewkey)
         await query.answer("🗑 Berhasil dihapus dari Favorit.", show_alert=False)
 
-    # --- PROSES DOWNLOAD REAL-TIME ---
+    # --- FITUR BATALKAN DOWNLOAD ---
+    elif data.startswith("cancel_dl:"):
+        task_id = data.split(":", 1)[1]
+        CANCEL_DOWNLOAD_TASKS.add(task_id)
+        await query.answer("🛑 Membatalkan pengunduhan...", show_alert=True)
+        try:
+            await query.message.edit_text("🛑 <b>Pengunduhan telah dibatalkan oleh pengguna.</b>", parse_mode="HTML")
+        except Exception:
+            pass
+
+    # --- PROSES DOWNLOAD REAL-TIME (DENGAN PEMOTONGAN AUTOMATIS FFMPEG) ---
     elif data.startswith("dl:"):
         await query.answer()
         _, viewkey, quality = data.split(":")
         target_url = f"https://www.pornhub.com/view_video.php?viewkey={viewkey}"
+        
+        task_id = f"{user_id}_{viewkey}_{int(time.time())}"
+        if task_id in CANCEL_DOWNLOAD_TASKS:
+            CANCEL_DOWNLOAD_TASKS.remove(task_id)
 
-        status_msg = await query.message.reply_text("⏳ Memulai pengunduhan...", parse_mode="HTML")
+        cancel_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Batalkan Download", callback_data=f"cancel_dl:{task_id}")]
+        ])
+
+        status_msg = await query.message.reply_text("⏳ Memulai pengunduhan...", parse_mode="HTML", reply_markup=cancel_markup)
         ext = "mp3" if quality == "mp3" else "mp4"
         filename = f"video_{viewkey}_{quality}.{ext}"
 
         loop = asyncio.get_running_loop()
-        success, direct_stream_url = await asyncio.to_thread(download_video_file, target_url, filename, quality, loop, status_msg)
+        success, direct_stream_url = await asyncio.to_thread(
+            download_video_file, target_url, filename, quality, task_id, loop, status_msg
+        )
+
+        if direct_stream_url == "CANCELLED":
+            if os.path.exists(filename):
+                os.remove(filename)
+            if task_id in CANCEL_DOWNLOAD_TASKS:
+                CANCEL_DOWNLOAD_TASKS.remove(task_id)
+            return
 
         if success and os.path.exists(filename):
-            await status_msg.edit_text("📤 Mengunggah file ke Telegram...")
+            await status_msg.edit_text("📤 Memeriksa dan menyiapkan file...")
+            
+            # Memotong video otomatis jika ukuran > 45 MB
+            files_to_send = split_video_file(filename, max_size_mb=45)
+            
             try:
-                with open(filename, "rb") as file_data:
-                    if quality == "mp3":
-                        await query.message.reply_audio(audio=file_data, caption=f"🎵 Audio Berhasil Diunduh!\n🔗 {target_url}")
-                    else:
-                        await query.message.reply_video(video=file_data, caption=f"🎬 Video ({quality}p) Berhasil Diunduh!\n🔗 {target_url}")
+                for idx, part_file in enumerate(files_to_send, start=1):
+                    caption = (
+                        f"🎬 <b>Part {idx}/{len(files_to_send)}</b> ({quality}p)\n🔗 {target_url}"
+                        if len(files_to_send) > 1
+                        else f"🎬 <b>Video ({quality}p) Berhasil Diunduh!</b>\n🔗 {target_url}"
+                    )
+                    
+                    with open(part_file, "rb") as file_data:
+                        if quality == "mp3":
+                            await query.message.reply_audio(audio=file_data, caption=caption, parse_mode="HTML")
+                        else:
+                            await query.message.reply_video(video=file_data, caption=caption, parse_mode="HTML")
+                    
+                    if part_file != filename and os.path.exists(part_file):
+                        os.remove(part_file)
+
                 await status_msg.delete()
             except Exception as e:
-                reply_markup = None
-                if direct_stream_url:
-                    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Direct Stream / Download Link", url=direct_stream_url)]])
-                
-                await status_msg.edit_text(
-                    "⚠️ <b>Ukuran file melebihi batas 50MB Telegram Bot!</b>\n"
-                    "Gunakan link direct stream di bawah ini untuk memutar / mendownload langsung:",
-                    parse_mode="HTML",
-                    reply_markup=reply_markup
-                )
+                logging.error(f"Error sending file: {e}")
+                await status_msg.edit_text("❌ Gagal mengunggah file ke Telegram.")
             finally:
                 if os.path.exists(filename):
                     os.remove(filename)
+                if task_id in CANCEL_DOWNLOAD_TASKS:
+                    CANCEL_DOWNLOAD_TASKS.remove(task_id)
         else:
             reply_markup = None
-            if direct_stream_url:
+            if direct_stream_url and direct_stream_url != "CANCELLED":
                 reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Stream Video Langsung", url=direct_stream_url)]])
 
             await status_msg.edit_text(
@@ -948,9 +1088,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
                 reply_markup=reply_markup
             )
+            if task_id in CANCEL_DOWNLOAD_TASKS:
+                CANCEL_DOWNLOAD_TASKS.remove(task_id)
 
 # ---------------------------------------------------------
-# 7. Handler Inline Mode (Dengan Thumbnail Pratinjau)
+# 7. Handler Inline Mode
 # ---------------------------------------------------------
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query.strip()
