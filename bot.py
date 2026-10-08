@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession
 from dotenv import load_dotenv
 import yt_dlp
+from aiohttp import web
 
 from telegram import (
     Update,
@@ -1094,37 +1095,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------
 # 7. Handler Inline Mode
 # ---------------------------------------------------------
-async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.inline_query.query.strip()
-    if not query:
-        return
 
-    videos = await scrape_pornhub(query, page=1, limit=5)
-    results = []
+# Fungsi dummy agar Render mendeteksi port aktif
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
 
-    for v in videos:
-        safe_title = html.escape(v["title"])
-        content = (
-            f"🎬 <b>{safe_title}</b>\n"
-            f"⏱ Durasi: {v['duration']} | 👁 Views: {v['views']} | ⭐ {v['rating']}\n"
-            f"🔗 <a href=\"{v['url']}\">Tonton Video</a>"
-        )
-        thumb_url = v.get("thumb") or v.get("preview") or None
-        results.append(
-            InlineQueryResultArticle(
-                id=v["viewkey"],
-                title=v["title"],
-                description=f"⏱ {v['duration']} | ⭐ {v['rating']} | 👁 {v['views']}",
-                thumbnail_url=thumb_url,
-                input_message_content=InputTextMessageContent(message_text=content, parse_mode="HTML")
-            )
-        )
-
-    await update.inline_query.answer(results, cache_time=60)
-
-# ---------------------------------------------------------
-# 8. Main Loop
-# ---------------------------------------------------------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -1136,7 +1111,21 @@ def main():
     app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_handler))
 
-    print("🤖 Bot Telegram Siap Dijalankan!")
+    # Bind port otomatis untuk Render
+    port = int(os.environ.get("PORT", 8080))
+    web_app = web.Application()
+    web_app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(web_app)
+    
+    async def start_web_server():
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(start_web_server())
+
+    print(f"🤖 Bot Telegram Siap Dijalankan di Port {port}!")
     app.run_polling()
 
 if __name__ == "__main__":
